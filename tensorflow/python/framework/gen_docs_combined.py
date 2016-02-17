@@ -19,9 +19,8 @@ from __future__ import division
 from __future__ import print_function
 
 import os.path
-
-import tensorflow.python.platform
 import sys
+
 import tensorflow as tf
 
 from tensorflow.python.framework import docs
@@ -36,22 +35,24 @@ tf.flags.DEFINE_boolean("print_hidden_regex", False,
 FLAGS = tf.flags.FLAGS
 
 
-# TODO(josh11b,wicke): Remove the ../../api_docs/python/ once the
-# website can handle it.
 PREFIX_TEXT = """
 Note: Functions taking `Tensor` arguments can also take anything accepted by
-[`tf.convert_to_tensor`](../../api_docs/python/framework.md#convert_to_tensor).
+[`tf.convert_to_tensor`](framework.md#convert_to_tensor).
 """
 
 
 def get_module_to_name():
-  return {tf: "tf",
-          tf.errors: "tf.errors",
-          tf.image: "tf.image",
-          tf.nn: "tf.nn",
-          tf.train: "tf.train",
-          tf.python_io: "tf.python_io",
-          tf.unsupported: "tf.unsupported",}
+  return {
+    tf: "tf",
+    tf.errors: "tf.errors",
+    tf.image: "tf.image",
+    tf.nn: "tf.nn",
+    tf.train: "tf.train",
+    tf.python_io: "tf.python_io",
+    tf.test: "tf.test",
+    tf.contrib.layers: "tf.contrib.layers",
+    tf.contrib.util: "tf.contrib.util",
+  }
 
 def all_libraries(module_to_name, members, documented):
   # A list of (filename, docs.Library) pairs representing the individual files
@@ -114,14 +115,19 @@ def all_libraries(module_to_name, members, documented):
                                "FeatureList", "FeatureLists",
                                "RankingExample", "SequenceExample"]),
       library("script_ops", "Wraps python functions", prefix=PREFIX_TEXT),
-      library("unsupported", "Unsupported", tf.unsupported),
+      library("test", "Testing", tf.test),
+      library("contrib.layers", "Layers (contrib)", tf.contrib.layers),
+      library("contrib.util", "Utilities (contrib)", tf.contrib.util),
   ]
 
 _hidden_symbols = ["Event", "LogMessage", "Summary", "SessionLog", "xrange",
                    "HistogramProto", "ConfigProto", "NodeDef", "GraphDef",
                    "GPUOptions", "GraphOptions", "SessionInterface",
                    "BaseSession", "NameAttrList", "AttrValue",
-                   "TensorArray", "OptimizerOptions"]
+                   "TensorArray", "OptimizerOptions",
+                   "CollectionDef", "MetaGraphDef", "QueueRunnerDef",
+                   "SaverDef", "VariableDef", "TestCase",
+                  ]
 
 def main(unused_argv):
   if not FLAGS.out_dir:

@@ -18,18 +18,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-# pylint: disable=unused-import,g-bad-import-order
-import tensorflow.python.platform
-# pylint: enable=unused-import,g-bad-import-order
-
 import time
+
 import numpy as np
+from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
 
 from tensorflow.python.framework import function
-# pylint: disable=unused-import
 from tensorflow.python.ops import functional_ops
-# pylint: enable=unused-import
 
 
 class FunctionTest(tf.test.TestCase):
@@ -151,7 +147,7 @@ class FunctionTest(tf.test.TestCase):
   def testDefineFunctionNoArgs(self):
 
     def AConstant():
-      return tf.constant([42.0])
+      return tf.constant([42])
 
     with tf.Graph().as_default():
       f_def = function.define_function(AConstant, {})
@@ -429,7 +425,7 @@ class UnrollLSTMTest(tf.test.TestCase):
       print("mode = ", mode)
       g = tf.Graph()
       start = time.time()
-      with g.as_default(), tf.device("/cpu:0"):
+      with g.as_default():
         weights = self._Weights()
         inp = self._Input()
         m = self._BuildForward(weights, inp, mode)
