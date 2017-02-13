@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,13 +20,14 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
+#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+
 #include <numeric>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -121,10 +122,7 @@ class SparseToDense : public OpKernel {
                             order);
 
     if (validate_indices_) {
-      OP_REQUIRES(c, st.IndicesValid(),
-                  errors::InvalidArgument("Indices are not valid: not "
-                                          "lexicographically sorted or "
-                                          "containing repeats."));
+      OP_REQUIRES_OK(c, st.IndicesValid());
     }
 
     output->flat<T>().setConstant(default_value.scalar<T>()());

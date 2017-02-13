@@ -2,7 +2,11 @@
 
 
 
+Represents the shape of a Tensor .
 
+A tensor&apos;s shape is denoted by its number of dimensions and a size for each dimension. For example, a Tensor represented by a 3 x 4 matrix would have a shape of 2-D, [3,4].
+
+If you know the exact shape of your Tensor when you create the TensorShape object, you can specify it then, or you can create a TensorShape with zero dimensions and one element, and call AddDim() to add dimensions later.
 
 ###Member Details
 
@@ -55,6 +59,18 @@ Copy the specified shape.
 
 
 #### `void tensorflow::TensorShape::operator=(const TensorShape &b)` {#void_tensorflow_TensorShape_operator_}
+
+
+
+
+
+#### `tensorflow::TensorShape::TensorShape(TensorShape &&b)` {#tensorflow_TensorShape_TensorShape}
+
+Move the specified shape. After moving, is safe for destruction and.
+
+
+
+#### `void tensorflow::TensorShape::operator=(TensorShape &&b)` {#void_tensorflow_TensorShape_operator_}
 
 
 
@@ -132,6 +148,12 @@ Returns true if `*this` and `b` have the same sizes. Ignores dimension names.
 
 
 
+#### `bool tensorflow::TensorShape::operator!=(const TensorShape &b) const` {#bool_tensorflow_TensorShape_operator_}
+
+
+
+
+
 #### `void tensorflow::TensorShape::AsProto(TensorShapeProto *proto) const` {#void_tensorflow_TensorShape_AsProto}
 
 Fill `*proto` from `*this`.
@@ -185,6 +207,12 @@ Returns `true` iff `proto` is a valid tensor shape.
 
 
 Returns `OK` iff `proto` is a valid tensor shape, and a descriptive error status otherwise.
+
+#### `static constexpr int tensorflow::TensorShape::MaxDimensions()` {#static_constexpr_int_tensorflow_TensorShape_MaxDimensions}
+
+
+
+
 
 #### `string tensorflow::TensorShape::DebugString(const TensorShapeProto &proto)` {#string_tensorflow_TensorShape_DebugString}
 

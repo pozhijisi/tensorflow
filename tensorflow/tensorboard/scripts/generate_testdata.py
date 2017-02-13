@@ -1,4 +1,4 @@
-# Copyright 2015 Google Inc. All Rights Reserved.
+# Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import base64
 import bisect
 import math
 import os
@@ -27,13 +26,22 @@ import os.path
 import random
 import shutil
 
+import numpy as np
 from six.moves import xrange  # pylint: disable=redefined-builtin
-import tensorflow as tf
+from tensorflow.core.framework import graph_pb2
+from tensorflow.core.framework import summary_pb2
+from tensorflow.core.util import event_pb2
+from tensorflow.python.client import session as session_lib
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import logging_ops
+from tensorflow.python.platform import app
+from tensorflow.python.platform import flags
+from tensorflow.python.summary.writer import writer as writer_lib
 
 tf.flags.DEFINE_string("target", None, """The directoy where serialized data
 will be written""")
 
-tf.flags.DEFINE_boolean("overwrite", False, """Whether to remove and overwrite
+flags.DEFINE_boolean("overwrite", False, """Whether to remove and overwrite
 TARGET if it already exists.""")
 
 FLAGS = tf.flags.FLAGS
@@ -68,13 +76,14 @@ def _MakeHistogram(values):
   bucket_limit = [lc[0] for lc in limit_counts]
   bucket = [lc[1] for lc in limit_counts]
   sum_sq = sum(v * v for v in values)
-  return tf.HistogramProto(min=min(values),
-                           max=max(values),
-                           num=len(values),
-                           sum=sum(values),
-                           sum_squares=sum_sq,
-                           bucket_limit=bucket_limit,
-                           bucket=bucket)
+  return summary_pb2.HistogramProto(
+      min=min(values),
+      max=max(values),
+      num=len(values),
+      sum=sum(values),
+      sum_squares=sum_sq,
+      bucket_limit=bucket_limit,
+      bucket=bucket)
 
 
 def WriteScalarSeries(writer, tag, f, n=5):
@@ -83,9 +92,9 @@ def WriteScalarSeries(writer, tag, f, n=5):
   wall_time = _start_time
   for i in xrange(n):
     v = f(i)
-    value = tf.Summary.Value(tag=tag, simple_value=v)
-    summary = tf.Summary(value=[value])
-    event = tf.Event(wall_time=wall_time, step=step, summary=summary)
+    value = summary_pb2.Summary.Value(tag=tag, simple_value=v)
+    summary = summary_pb2.Summary(value=[value])
+    event = event_pb2.Event(wall_time=wall_time, step=step, summary=summary)
     writer.add_event(event)
     step += 1
     wall_time += 10
@@ -98,8 +107,10 @@ def WriteHistogramSeries(writer, tag, mu_sigma_tuples, n=20):
   for [mean, stddev] in mu_sigma_tuples:
     data = [random.normalvariate(mean, stddev) for _ in xrange(n)]
     histo = _MakeHistogram(data)
-    summary = tf.Summary(value=[tf.Summary.Value(tag=tag, histo=histo)])
-    event = tf.Event(wall_time=wall_time, step=step, summary=summary)
+    summary = summary_pb2.Summary(
+        value=[summary_pb2.Summary.Value(
+            tag=tag, histo=histo)])
+    event = event_pb2.Event(wall_time=wall_time, step=step, summary=summary)
     writer.add_event(event)
     step += 10
     wall_time += 100
@@ -107,35 +118,99 @@ def WriteHistogramSeries(writer, tag, mu_sigma_tuples, n=20):
 
 def WriteImageSeries(writer, tag, n_images=1):
   """Write a few dummy images to writer."""
-  # 1x1 transparent GIF.
-  encoded_image = base64.b64decode(
-      "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
-  image_value = tf.Summary.Image(height=1,
-                                 width=1,
-                                 colorspace=1,
-                                 encoded_image_string=encoded_image)
   step = 0
-  wall_time = _start_time
+  session = session_lib.Session()
+  p = array_ops.placeholder("uint8", (1, 4, 4, 3))
+  s = logging_ops.image_summary(tag, p)
   for _ in xrange(n_images):
-    value = tf.Summary.Value(tag=tag, image=image_value)
-    event = tf.Event(wall_time=wall_time,
-                     step=step,
-                     summary=tf.Summary(value=[value]))
-    writer.add_event(event)
+    im = np.random.random_integers(0, 255, (1, 4, 4, 3))
+    summ = session.run(s, feed_dict={p: im})
+    writer.add_summary(summ, step)
     step += 20
-    wall_time += 200
+  session.close()
+
+
+def WriteAudioSeries(writer, tag, n_audio=1):
+  """Write a few dummy audio clips to writer."""
+  step = 0
+  session = session_lib.Session()
+
+  min_frequency_hz = 440
+  max_frequency_hz = 880
+  sample_rate = 4000
+  duration_frames = sample_rate * 0.5  # 0.5 seconds.
+  frequencies_per_run = 1
+  num_channels = 2
+
+  p = array_ops.placeholder("float32", (frequencies_per_run, duration_frames,
+                                        num_channels))
+  s = logging_ops.audio_summary(tag, p, sample_rate)
+
+  for _ in xrange(n_audio):
+    # Generate a different frequency for each channel to show stereo works.
+    frequencies = np.random.random_integers(
+        min_frequency_hz,
+        max_frequency_hz,
+        size=(frequencies_per_run, num_channels))
+    tiled_frequencies = np.tile(frequencies, (1, duration_frames))
+    tiled_increments = np.tile(
+        np.arange(0, duration_frames),
+        (num_channels, 1)).T.reshape(1, duration_frames * num_channels)
+    tones = np.sin(2.0 * np.pi * tiled_frequencies * tiled_increments /
+                   sample_rate)
+    tones = tones.reshape(frequencies_per_run, duration_frames, num_channels)
+
+    summ = session.run(s, feed_dict={p: tones})
+    writer.add_summary(summ, step)
+    step += 20
+  session.close()
 
 
 def GenerateTestData(path):
   """Generates the test data directory."""
   run1_path = os.path.join(path, "run1")
   os.makedirs(run1_path)
-  writer = tf.train.SummaryWriter(run1_path)
-  WriteScalarSeries(writer, "cross_entropy (1)", lambda x: x*x)
-  WriteHistogramSeries(writer, "histo1", [[0, 1], [0.3, 1], [0.5, 1], [0.7, 1],
-                                          [1, 1]])
-  WriteImageSeries(writer, "im1")
-  writer.close()
+  writer1 = writer_lib.FileWriter(run1_path)
+  WriteScalarSeries(writer1, "foo/square", lambda x: x * x)
+  WriteScalarSeries(writer1, "bar/square", lambda x: x * x)
+  WriteScalarSeries(writer1, "foo/sin", math.sin)
+  WriteScalarSeries(writer1, "foo/cos", math.cos)
+  WriteHistogramSeries(writer1, "histo1", [[0, 1], [0.3, 1], [0.5, 1], [0.7, 1],
+                                           [1, 1]])
+  WriteImageSeries(writer1, "im1")
+  WriteImageSeries(writer1, "im2")
+  WriteAudioSeries(writer1, "au1")
+
+  run2_path = os.path.join(path, "run2")
+  os.makedirs(run2_path)
+  writer2 = writer_lib.FileWriter(run2_path)
+  WriteScalarSeries(writer2, "foo/square", lambda x: x * x * 2)
+  WriteScalarSeries(writer2, "bar/square", lambda x: x * x * 3)
+  WriteScalarSeries(writer2, "foo/cos", lambda x: math.cos(x) * 2)
+  WriteHistogramSeries(writer2, "histo1", [[0, 2], [0.3, 2], [0.5, 2], [0.7, 2],
+                                           [1, 2]])
+  WriteHistogramSeries(writer2, "histo2", [[0, 1], [0.3, 1], [0.5, 1], [0.7, 1],
+                                           [1, 1]])
+  WriteImageSeries(writer2, "im1")
+  WriteAudioSeries(writer2, "au2")
+
+  graph_def = graph_pb2.GraphDef()
+  node1 = graph_def.node.add()
+  node1.name = "a"
+  node1.op = "matmul"
+  node2 = graph_def.node.add()
+  node2.name = "b"
+  node2.op = "matmul"
+  node2.input.extend(["a:0"])
+
+  writer1.add_graph(graph_def)
+  node3 = graph_def.node.add()
+  node3.name = "c"
+  node3.op = "matmul"
+  node3.input.extend(["a:0", "b:0"])
+  writer2.add_graph(graph_def)
+  writer1.close()
+  writer2.close()
 
 
 def main(unused_argv=None):
@@ -156,4 +231,4 @@ def main(unused_argv=None):
 
 
 if __name__ == "__main__":
-  tf.app.run()
+  app.run()

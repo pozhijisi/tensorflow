@@ -60,6 +60,12 @@ Return true iff the rank and all of the dimensions are well defined.
 
 
 
+#### `bool tensorflow::PartialTensorShape::IsIdenticalTo(const PartialTensorShape &shape) const` {#bool_tensorflow_PartialTensorShape_IsIdenticalTo}
+
+
+
+Exact equality test. Returns true iff the ranks match (i.e., both are unknown, or both are known and equal), and all dimensions are equal (i.e., both dimensions are known, or both are known and equal). This is a stronger condition that IsCompatibleWith.
+
 #### `bool tensorflow::PartialTensorShape::IsCompatibleWith(const PartialTensorShape &shape) const` {#bool_tensorflow_PartialTensorShape_IsCompatibleWith}
 
 
@@ -120,8 +126,14 @@ Returns `OK` iff `proto` is a valid tensor shape, and a descriptive error status
 
 
 
-#### `Status tensorflow::PartialTensorShape::MakePartialShape(const T *dims, int n, PartialTensorShape *out)` {#Status_tensorflow_PartialTensorShape_MakePartialShape}
+#### `static Status tensorflow::PartialTensorShape::MakePartialShape(const int32 *dims, int n, PartialTensorShape *out)` {#static_Status_tensorflow_PartialTensorShape_MakePartialShape}
 
 Returns a ` PartialTensorShape ` whose dimensions are `dims[0]`, `dims[1]`, ..., `dims[n-1]`. Values of -1 are considered "unknown".
+
+
+
+#### `static Status tensorflow::PartialTensorShape::MakePartialShape(const int64 *dims, int n, PartialTensorShape *out)` {#static_Status_tensorflow_PartialTensorShape_MakePartialShape}
+
+
 
 

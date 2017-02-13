@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
@@ -113,6 +114,25 @@ TEST(PartialTensorShapeTest, ToTensorShape) {
   EXPECT_FALSE(d.AsTensorShape(&full));
 }
 
+TEST(PartialTensorShapeTest, PartialShapeIdenticalTo) {
+  const PartialTensorShape a({-1, 0, 1});
+  const PartialTensorShape b({1, 0, 1});
+  const PartialTensorShape c({-1, -1, 1});
+  const PartialTensorShape d({1, 0});
+  const PartialTensorShape e({-1, 0, 2});
+  const PartialTensorShape f({});
+  const PartialTensorShape g;
+  std::vector<PartialTensorShape> shapes = {a, b, c, d, e, f, g};
+  for (int i = 0; i < shapes.size(); ++i) {
+    for (int j = 0; j < i; ++j) {
+      if (i == j) {
+        EXPECT_TRUE(shapes[i].IsIdenticalTo(shapes[j]));
+      } else {
+        EXPECT_FALSE(shapes[i].IsIdenticalTo(shapes[j]));
+      }
+    }
+  }
+}
 
 TEST(PartialTensorShapeTest, PartialShapeCompatibleWith) {
   const PartialTensorShape a({-1, 0, 1});
@@ -215,6 +235,26 @@ TEST(PartialTensorShapeTest, PartialShapeMergeWith) {
   EXPECT_EQ(test.dim_size(0), -1);
   EXPECT_EQ(test.dim_size(1), 0);
   EXPECT_EQ(test.dim_size(2), 1);
+}
+
+TEST(PartialTensorShapeTest, MakePartialShapeEmpty) {
+  // Empty made partial shapes should still be fully defined
+  const int64 dims[1] = {};
+  PartialTensorShape shape;
+  EXPECT_FALSE(shape.IsFullyDefined());
+  TF_ASSERT_OK(PartialTensorShape::MakePartialShape(dims, 0, &shape));
+  EXPECT_TRUE(shape.IsFullyDefined());
+}
+
+TEST(PartialTensorShapeTest, MakePartialShapeFull) {
+  // Check that arrays are copied through correctly
+  const int64 dims[3] = {7, -1, 2};
+  PartialTensorShape shape;
+  TF_ASSERT_OK(PartialTensorShape::MakePartialShape(dims, 3, &shape));
+  ASSERT_EQ(shape.dims(), 3);
+  for (int i = 0; i < 3; i++) {
+    EXPECT_EQ(shape.dim_size(i), dims[i]);
+  }
 }
 
 }  // namespace

@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,18 +16,248 @@ limitations under the License.
 // See docs in ../ops/image_ops.cc
 #define EIGEN_USE_THREADS
 
+#include <math.h>
 #include <algorithm>
-#include <memory>
+#include <array>
+
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/kernels/image_resizer_state.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace tensorflow {
+namespace {
+
+static const int64 kTableSize = (1 << 10);
+
+const float* InitCoeffsTable() {
+  // Allocate and initialize coefficients table using Bicubic
+  // convolution algorithm.
+  // https://en.wikipedia.org/wiki/Bicubic_interpolation
+  float* coeffs_table = new float[(kTableSize + 1) * 2];
+  static const double A = -0.75;
+  for (int i = 0; i <= kTableSize; ++i) {
+    float x = i * 1.0 / kTableSize;
+    coeffs_table[i * 2] = ((A + 2) * x - (A + 3)) * x * x + 1;
+    x += 1.0;
+    coeffs_table[i * 2 + 1] = ((A * x - 5 * A) * x + 8 * A) * x - 4 * A;
+  }
+  return coeffs_table;
+}
+
+const float* GetCoeffsTable() {
+  // Static so that we initialize it on first use
+  static const float* coeffs_table = InitCoeffsTable();
+  return coeffs_table;
+}
+
+inline int64 Bound(int64 val, int64 limit) {
+  return std::min(limit - 1ll, std::max(0ll, val));
+}
+
+inline void GetWeightsAndIndices(const float scale, const int64 out_loc,
+                                 const int64 limit, float* weight_0,
+                                 float* weight_1, float* weight_2,
+                                 float* weight_3, int64* index_0,
+                                 int64* index_1, int64* index_2,
+                                 int64* index_3) {
+  const int64 in_loc = scale * out_loc;
+  const float delta = scale * out_loc - in_loc;
+  const int64 offset = lrintf(delta * kTableSize);
+  const float* coeffs_table = GetCoeffsTable();
+  *weight_0 = coeffs_table[offset * 2 + 1];
+  *weight_1 = coeffs_table[offset * 2];
+  *weight_2 = coeffs_table[(kTableSize - offset) * 2];
+  *weight_3 = coeffs_table[(kTableSize - offset) * 2 + 1];
+  *index_0 = Bound(in_loc - 1, limit);
+  *index_1 = Bound(in_loc, limit);
+  *index_2 = Bound(in_loc + 1, limit);
+  *index_3 = Bound(in_loc + 2, limit);
+}
+
+template <typename T>
+inline float Interpolate1D(const float weight_0, const float weight_1,
+                           const float weight_2, const float weight_3,
+                           const T value_0, const T value_1, const T value_2,
+                           const T value_3) {
+  return static_cast<float>(value_0) * weight_0 +
+         static_cast<float>(value_1) * weight_1 +
+         static_cast<float>(value_2) * weight_2 +
+         static_cast<float>(value_3) * weight_3;
+}
+
+// In order to compute a single output value, we look at a 4x4 patch in the
+// source image. As we iterate increasing X across the image, the new 4x4 patch
+// often overlaps with the previous 4x4 patch we just looked at.
+//
+// This class helps retain that intermediate computation work.
+class CachedInterpolation {
+ public:
+  CachedInterpolation()
+      : values_({{std::make_pair(-1, -1), std::make_pair(-1, -1),
+                  std::make_pair(-1, -1), std::make_pair(-1, -1)}}) {}
+
+  // Advances the buffer. Returns the number of valid values.
+  inline int Advance(const int64 x_0, const int64 x_1, const int64 x_2,
+                     const int64 x_3) {
+    // Either we have started a new line, or we don't have any values yet.
+    if (x_0 < values_[0].first || values_[0].first == -1) {
+      // Zero cached values were valid, we must recompute everything.
+      return 0;
+    }
+    if (values_[0].first == x_0 && values_[3].first == x_3) {
+      // Everything's the same. Yay!
+      return 4;
+    }
+    if (values_[1].first != 0 && values_[2].first != values_[3].first) {
+      // Fast (normal) path
+      if (values_[1].first == x_0) {
+        CopyPoint(1, 0);
+        CopyPoint(2, 1);
+        CopyPoint(3, 2);
+        return 3;
+      }
+      if (values_[2].first == x_0) {
+        CopyPoint(2, 0);
+        CopyPoint(3, 1);
+        return 2;
+      }
+    }
+    // We use 2 hands and walk through, copying from one to another where
+    // we already have values.
+    // Invarient, new_indicies_hand <= cached_values_hand
+    const std::array<int64, 4> new_x_indices{{x_0, x_1, x_2, x_3}};
+    int cached_values_hand = 0;
+    int new_indicies_hand = 0;
+    while (cached_values_hand < 4) {
+      if (values_[cached_values_hand].first ==
+          new_x_indices[new_indicies_hand]) {
+        if (new_indicies_hand < cached_values_hand) {
+          CopyPoint(cached_values_hand, new_indicies_hand);
+        }
+        cached_values_hand++;
+        new_indicies_hand++;
+      } else {
+        cached_values_hand++;
+      }
+    }
+    return new_indicies_hand;
+  }
+
+  inline void SetPoint(const int index, const int64 x_index,
+                       const float value) {
+    values_[index] = std::make_pair(x_index, value);
+  }
+
+  // Compute the 1D interpolation for a given X index using the y_weights
+  inline float Compute(const float xw_0, const float xw_1, const float xw_2,
+                       const float xw_3) const {
+    return Interpolate1D(xw_0, xw_1, xw_2, xw_3, values_[0].second,
+                         values_[1].second, values_[2].second,
+                         values_[3].second);
+  }
+
+ private:
+  inline void CopyPoint(const int source, const int dest) {
+    values_[dest] = values_[source];
+  }
+
+  std::array<std::pair<int64, float>, 4> values_;
+};
+
+template <typename T>
+inline void interpolate_with_caching(
+    const typename TTypes<T, 4>::ConstTensor& input_data,
+    const ImageResizerState& resizer_state,
+    typename TTypes<float, 4>::Tensor output_data) {
+  std::vector<CachedInterpolation> cached_values(resizer_state.channels);
+  for (int64 b = 0; b < resizer_state.batch_size; ++b) {
+    for (int64 y = 0; y < resizer_state.out_height; ++y) {
+      float y_weight_0;
+      float y_weight_1;
+      float y_weight_2;
+      float y_weight_3;
+      int64 y_index_0;
+      int64 y_index_1;
+      int64 y_index_2;
+      int64 y_index_3;
+      GetWeightsAndIndices(resizer_state.height_scale, y,
+                           resizer_state.in_height, &y_weight_0, &y_weight_1,
+                           &y_weight_2, &y_weight_3, &y_index_0, &y_index_1,
+                           &y_index_2, &y_index_3);
+      for (int64 x = 0; x < resizer_state.out_width; ++x) {
+        float xw_0;
+        float xw_1;
+        float xw_2;
+        float xw_3;
+        int64 x_index_0;
+        int64 x_index_1;
+        int64 x_index_2;
+        int64 x_index_3;
+        GetWeightsAndIndices(resizer_state.width_scale, x,
+                             resizer_state.in_width, &xw_0, &xw_1, &xw_2, &xw_3,
+                             &x_index_0, &x_index_1, &x_index_2, &x_index_3);
+        for (int64 c = 0; c < resizer_state.channels; ++c) {
+          const int advance = cached_values[c].Advance(x_index_0, x_index_1,
+                                                       x_index_2, x_index_3);
+          switch (advance) {
+            case 0:
+              cached_values[c].SetPoint(
+                  0, x_index_0,
+                  Interpolate1D<T>(y_weight_0, y_weight_1, y_weight_2,
+                                   y_weight_3,
+                                   input_data(b, y_index_0, x_index_0, c),
+                                   input_data(b, y_index_1, x_index_0, c),
+                                   input_data(b, y_index_2, x_index_0, c),
+                                   input_data(b, y_index_3, x_index_0, c)));
+              TF_FALLTHROUGH_INTENDED;
+            case 1:
+              cached_values[c].SetPoint(
+                  1, x_index_1,
+                  Interpolate1D<T>(y_weight_0, y_weight_1, y_weight_2,
+                                   y_weight_3,
+                                   input_data(b, y_index_0, x_index_1, c),
+                                   input_data(b, y_index_1, x_index_1, c),
+                                   input_data(b, y_index_2, x_index_1, c),
+                                   input_data(b, y_index_3, x_index_1, c)));
+              TF_FALLTHROUGH_INTENDED;
+            case 2:
+              cached_values[c].SetPoint(
+                  2, x_index_2,
+                  Interpolate1D<T>(y_weight_0, y_weight_1, y_weight_2,
+                                   y_weight_3,
+                                   input_data(b, y_index_0, x_index_2, c),
+                                   input_data(b, y_index_1, x_index_2, c),
+                                   input_data(b, y_index_2, x_index_2, c),
+                                   input_data(b, y_index_3, x_index_2, c)));
+              TF_FALLTHROUGH_INTENDED;
+            case 3:
+              cached_values[c].SetPoint(
+                  3, x_index_3,
+                  Interpolate1D<T>(y_weight_0, y_weight_1, y_weight_2,
+                                   y_weight_3,
+                                   input_data(b, y_index_0, x_index_3, c),
+                                   input_data(b, y_index_1, x_index_3, c),
+                                   input_data(b, y_index_2, x_index_3, c),
+                                   input_data(b, y_index_3, x_index_3, c)));
+              TF_FALLTHROUGH_INTENDED;
+            default:
+              output_data(b, y, x, c) =
+                  cached_values[c].Compute(xw_0, xw_1, xw_2, xw_3);
+              break;
+          }
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
 
 typedef Eigen::ThreadPoolDevice CPUDevice;
 
@@ -40,95 +270,16 @@ class ResizeBicubicOp : public OpKernel {
 
   void Compute(OpKernelContext* context) override {
     const Tensor& input = context->input(0);
-    OP_REQUIRES(context, input.dims() == 4,
-                errors::InvalidArgument("input must be 4-dimensional",
-                                        input.shape().DebugString()));
-    const Tensor& shape_t = context->input(1);
-    OP_REQUIRES(context, shape_t.dims() == 1,
-                errors::InvalidArgument("shape_t must be 1-dimensional",
-                                        shape_t.shape().DebugString()));
-    OP_REQUIRES(context, shape_t.NumElements() == 2,
-                errors::InvalidArgument("shape_t must have two elements",
-                                        shape_t.shape().DebugString()));
+    ImageResizerState st(align_corners_);
+    st.ValidateAndCreateOutput(context, input);
 
-    auto Svec = shape_t.vec<int32>();
-    // Initialize shape to the batch size of the input, then add
-    // the rest of the dimensions
-    Tensor* output = nullptr;
-    OP_REQUIRES_OK(context, context->allocate_output(
-                                0, TensorShape({input.dim_size(0), Svec(0),
-                                                Svec(1), input.dim_size(3)}),
-                                &output));
-    const int64 batch_size = input.dim_size(0);
-    const int64 in_height = input.dim_size(1);
-    const int64 in_width = input.dim_size(2);
-    const int64 channels = input.dim_size(3);
-    const int64 out_height = output->dim_size(1);
-    const int64 out_width = output->dim_size(2);
-    CHECK_GT(in_height, 0);
-    CHECK_GT(in_width, 0);
-    CHECK_GT(channels, 0);
-    CHECK_GT(out_height, 0);
-    CHECK_GT(out_width, 0);
+    if (!context->status().ok()) return;
 
     typename TTypes<T, 4>::ConstTensor input_data = input.tensor<T, 4>();
-    typename TTypes<float, 4>::Tensor output_data = output->tensor<float, 4>();
+    typename TTypes<float, 4>::Tensor output_data =
+        st.output->tensor<float, 4>();
 
-    const float height_scale =
-        (align_corners_ && out_height > 1)
-            ? (in_height - 1) / static_cast<float>(out_height - 1)
-            : in_height / static_cast<float>(out_height);
-    const float width_scale =
-        (align_corners_ && out_width > 1)
-            ? (in_width - 1) / static_cast<float>(out_width - 1)
-            : in_width / static_cast<float>(out_width);
-
-    // Initialize coefficients table using Bicubic convolution algorithm.
-    // https://en.wikipedia.org/wiki/Bicubic_interpolation
-    static const int64 tab_size = (1 << 10);
-    static float coeffs_tab[(tab_size + 1) * 2];
-    static const double A = -0.75;
-    for (int i = 0; i <= tab_size; ++i) {
-      float x = i * 1.0 / tab_size;
-      coeffs_tab[i * 2] = ((A + 2) * x - (A + 3)) * x * x + 1;
-      x += 1.0;
-      coeffs_tab[i * 2 + 1] = ((A * x - 5 * A) * x + 8 * A) * x - 4 * A;
-    }
-
-    auto cal = [](float v0, float v1, float v2, float v3, float dx) {
-      const int64 offset = round(dx * tab_size);
-      const float a0 = coeffs_tab[offset * 2 + 1];
-      const float a1 = coeffs_tab[offset * 2];
-      const float a2 = coeffs_tab[(tab_size - offset) * 2];
-      const float a3 = coeffs_tab[(tab_size - offset) * 2 + 1];
-      return a0 * v0 + a1 * v1 + a2 * v2 + a3 * v3;
-    };
-
-    float coeff[4] = {0.0};
-    for (int64 b = 0; b < batch_size; ++b) {
-      for (int64 y = 0; y < out_height; ++y) {
-        const int64 in_y = floor(height_scale * y);
-        const float dy = height_scale * y - in_y;
-        for (int64 x = 0; x < out_width; ++x) {
-          const int64 in_x = floor(width_scale * x);
-          const float dx = width_scale * x - in_x;
-          for (int64 c = 0; c < channels; ++c) {
-            for (int64 i = 0; i < 4; ++i) {
-#define BOUND(val, limit) std::min(((limit)-1ll), (std::max(0ll, (val))))
-              int64 bound_y = BOUND(in_y - 1 + i, in_height);
-              coeff[i] =
-                  cal(input_data(b, bound_y, BOUND(in_x - 1, in_width), c),
-                      input_data(b, bound_y, BOUND(in_x, in_width), c),
-                      input_data(b, bound_y, BOUND(in_x + 1, in_width), c),
-                      input_data(b, bound_y, BOUND(in_x + 2, in_width), c), dx);
-#undef BOUND
-            }
-            output_data(b, y, x, c) =
-                cal(coeff[0], coeff[1], coeff[2], coeff[3], dy);
-          }
-        }
-      }
-    }
+    interpolate_with_caching<T>(input_data, st, output_data);
   }
 
  private:

@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -146,7 +146,7 @@ TEST(JpegMemTest, Jpeg2) {
     CHECK_EQ(cptest, cpdata2);
   }
 
-  // Uncompress twice: once with 3 components and once with autodetect
+  // Uncompress twice: once with 3 components and once with autodetect.
   std::unique_ptr<uint8[]> imgdata1;
   for (const int components : {0, 3}) {
     // Uncompress it
@@ -175,7 +175,8 @@ TEST(JpegMemTest, Jpeg2) {
     flags.stride = 3 * 411;
     const std::unique_ptr<uint8[]> imgdata2(new uint8[flags.stride * in_h]);
     CHECK(imgdata2.get() == Uncompress(cpdata2.c_str(), cpdata2.length(), flags,
-                                       NULL, [&imgdata2](int w, int h, int c) {
+                                       nullptr /* nwarn */,
+                                       [&imgdata2](int w, int h, int c) {
                                          CHECK_EQ(w, in_w);
                                          CHECK_EQ(h, in_h);
                                          CHECK_EQ(c, 3);
@@ -184,6 +185,27 @@ TEST(JpegMemTest, Jpeg2) {
     const int totalerr = ComputeSumAbsoluteDifference(
         imgdata1.get(), imgdata2.get(), in_w, in_h, stride1, flags.stride);
     CHECK_EQ(totalerr, 0);
+  }
+
+  {
+    // Uncompress it with a faster, lossier algorithm.
+    UncompressFlags flags;
+    flags.components = 3;
+    flags.dct_method = JDCT_IFAST;
+    int w, h, c;
+    imgdata1.reset(
+        Uncompress(cpdata1.c_str(), cpdata1.length(), flags, &w, &h, &c, NULL));
+
+    // Check obvious formatting stuff
+    CHECK_EQ(w, in_w);
+    CHECK_EQ(h, in_h);
+    CHECK_EQ(c, 3);
+    CHECK(imgdata1.get());
+
+    // Compare the two images
+    const int totalerr = ComputeSumAbsoluteDifference(
+        imgdata1.get(), refdata1.get(), in_w, in_h, stride1, stride1);
+    ASSERT_LE(totalerr, 200000);
   }
 }
 
@@ -241,7 +263,8 @@ TEST(JpegMemTest, ChromaDownsampling) {
   // First, uncompress the JPEG.
   UncompressFlags unflags;
   unflags.components = 3;
-  int w, h, c, num_warnings;
+  int w, h, c;
+  int64 num_warnings;
   std::unique_ptr<uint8[]> uncompressed(Uncompress(
       jpeg.c_str(), jpeg.size(), unflags, &w, &h, &c, &num_warnings));
   CHECK(uncompressed.get() != NULL);

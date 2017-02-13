@@ -1,4 +1,4 @@
-/* Copyright 2015 Google Inc. All Rights Reserved.
+/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/gpu/gpu_event_mgr.h"
 
-#include "tensorflow/core/framework/config.pb.h"
 #include "tensorflow/core/platform/stream_executor.h"
+#include "tensorflow/core/protobuf/config.pb.h"
 
 namespace gpu = ::perftools::gputools;
 
@@ -27,6 +27,13 @@ EventMgr::EventMgr(gpu::StreamExecutor* se, const GPUOptions& gpu_options)
       deferred_bytes_threshold_(gpu_options.deferred_deletion_bytes()
                                     ? gpu_options.deferred_deletion_bytes()
                                     : 8 * 1048576),
+      polling_active_delay_usecs_(gpu_options.polling_active_delay_usecs()
+                                      ? gpu_options.polling_active_delay_usecs()
+                                      : 10),
+      polling_inactive_delay_msecs_(
+          gpu_options.polling_inactive_delay_msecs()
+              ? gpu_options.polling_inactive_delay_msecs()
+              : 1),
       accumulated_stream_(nullptr),
       accumulated_tensors_(new TensorReferenceVector),
       accumulated_tensor_bytes_(0),
@@ -57,6 +64,11 @@ EventMgr::~EventMgr() {
       delete ue->mem;
     }
     if (ue->bufrec.buf) {
+      if (LogMemory::IsEnabled()) {
+        LogMemory::RecordRawDeallocation(ue->bufrec.operation,
+                                         ue->bufrec.step_id, ue->bufrec.buf,
+                                         ue->bufrec.alloc, false);
+      }
       ue->bufrec.alloc->DeallocateRaw(ue->bufrec.buf);
     }
     if (ue->func != nullptr) threadpool_.Schedule(ue->func);
@@ -90,7 +102,7 @@ void EventMgr::ThenDeleteTensors(perftools::gputools::Stream* stream,
     FlushAccumulatedTensors();
   }
   accumulated_stream_ = stream;
-  for (auto t : tensors) {
+  for (const auto& t : tensors) {
     // accumulated_tensors_ takes over ownership of the reference to "t"
     accumulated_tensors_->push_back(t);
     accumulated_tensor_bytes_ += t.TotalBytes();
@@ -116,15 +128,13 @@ void EventMgr::FlushAccumulatedTensors() {
 // to poll frequently when the queue is non-empty, and infrequently
 // otherwise.
 void EventMgr::PollLoop() {
-  const int32 kPollingDelayUsecs = 10;
-  const int32 kPollingSuspendMsecs = 1;
   bool queue_empty = false;
   while (!stop_polling_->HasBeenNotified()) {
     if (queue_empty) {
       mutex_lock l(mu_);
-      WaitForMilliseconds(&l, &events_pending_, kPollingSuspendMsecs);
+      WaitForMilliseconds(&l, &events_pending_, polling_inactive_delay_msecs_);
     } else {
-      Env::Default()->SleepForMicroseconds(kPollingDelayUsecs);
+      Env::Default()->SleepForMicroseconds(polling_active_delay_usecs_);
     }
     ToFreeVector to_free;
     {

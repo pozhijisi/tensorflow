@@ -3,7 +3,7 @@
 Queues are a powerful mechanism for asynchronous computation using TensorFlow.
 
 Like everything in TensorFlow, a queue is a node in a TensorFlow graph. It's a
-stateful node, like variable: other nodes can modify its content. In
+stateful node, like a variable: other nodes can modify its content. In
 particular, nodes can enqueue new items in to the queue, or dequeue existing
 items from the queue.
 
@@ -20,14 +20,20 @@ end of the queue. Slowly, the numbers on the queue increase.
 `Enqueue`, `EnqueueMany`, and `Dequeue` are special nodes. They take a pointer
 to the queue instead of a normal value, allowing them to change it. We recommend
 you think of these as being like methods of the queue. In fact, in the Python
-API, they are methods of the queue object (eg. `q.enqueue(...)`).
+API, they are methods of the queue object (e.g. `q.enqueue(...)`).
+
+**N.B.** Queue methods (such as `q.enqueue(...)`) *must* run on the same device
+as the queue. Incompatible device placement directives will be ignored when
+creating these operations.
 
 Now that you have a bit of a feel for queues, let's dive into the details...
 
-## Queue Use Overview
+## Queue usage overview
 
-Queues, such as `FIFOQueue` and `RandomShuffleQueue`, are important TensorFlow
-objects for computing tensors asynchronously in a graph.
+Queues, such as [`FIFOQueue`](../../api_docs/python/io_ops.md#FIFOQueue)
+and [`RandomShuffleQueue`](../../api_docs/python/io_ops.md#RandomShuffleQueue),
+are important TensorFlow objects for computing tensors asynchronously in a
+graph.
 
 For example, a typical input architecture is to use a `RandomShuffleQueue` to
 prepare inputs for training a model:
@@ -47,8 +53,8 @@ threads must be able to stop together, exceptions must be caught and
 reported, and queues must be properly closed when stopping.
 
 TensorFlow provides two classes to help:
-[tf.Coordinator](../../api_docs/python/train.md#Coordinator) and
-[tf.QueueRunner](../../api_docs/python/train.md#QueueRunner). These two classes
+[`tf.train.Coordinator`](../../api_docs/python/train.md#Coordinator) and
+[`tf.train.QueueRunner`](../../api_docs/python/train.md#QueueRunner). These two classes
 are designed to be used together. The `Coordinator` class helps multiple threads
 stop together and report exceptions to a program that waits for them to stop.
 The `QueueRunner` class is used to create a number of threads cooperating to
@@ -56,13 +62,13 @@ enqueue tensors in the same queue.
 
 ## Coordinator
 
-The Coordinator class helps multiple threads stop together.
+The `Coordinator` class helps multiple threads stop together.
 
 Its key methods are:
 
-* `should_stop()`: returns True if the threads should stop.
-* `request_stop(<exception>)`: requests that threads should stop.
-* `join(<list of threads>)`: waits until the specified threads have stopped.
+* [`should_stop()`](../../api_docs/python/train.md#Coordinator.should_stop): returns True if the threads should stop.
+* [`request_stop(exception)`](../../api_docs/python/train.md#Coordinator.request_stop): requests that threads should stop.
+* [`join(thread_list)`](../../api_docs/python/train.md#Coordinator.join): waits until the specified threads have stopped.
 
 You first create a `Coordinator` object, and then create a number of threads
 that use the coordinator.  The threads typically run loops that stop when
@@ -81,20 +87,21 @@ def MyLoop(coord):
     if ...some condition...:
       coord.request_stop()
 
-# Main code: create a coordinator.
-coord = Coordinator()
+# Main thread: create a coordinator.
+coord = tf.train.Coordinator()
 
 # Create 10 threads that run 'MyLoop()'
 threads = [threading.Thread(target=MyLoop, args=(coord,)) for i in xrange(10)]
 
 # Start the threads and wait for all of them to stop.
-for t in threads: t.start()
+for t in threads:
+  t.start()
 coord.join(threads)
 ```
 
 Obviously, the coordinator can manage threads doing very different things.
 They don't have to be all the same as in the example above.  The coordinator
-also has support to capture and report exceptions.  See the [Coordinator class](../../api_docs/python/train.md#Coordinator) documentation for more details.
+also has support to capture and report exceptions.  See the [`tf.train.Coordinator`](../../api_docs/python/train.md#Coordinator) documentation for more details.
 
 ## QueueRunner
 
@@ -105,7 +112,7 @@ queue if an exception is reported to the coordinator.
 
 You can use a queue runner to implement the architecture described above.
 
-First build a graph that uses a `Queue` for input examples.  Add ops that
+First build a graph that uses a TensorFlow queue (e.g. a `tf.RandomShuffleQueue`) for input examples.  Add ops that
 process examples and enqueue them in the queue.  Add training ops that start by
 dequeueing from the queue.
 
@@ -142,14 +149,14 @@ for step in xrange(1000000):
 # When done, ask the threads to stop.
 coord.request_stop()
 # And wait for them to actually do it.
-coord.join(threads)
+coord.join(enqueue_threads)
 ```
 
-## Handling Exceptions
+## Handling exceptions
 
 Threads started by queue runners do more than just run the enqueue ops.  They
-also catch and handle exceptions generated by queues, including
-`OutOfRangeError` which is used to report that a queue was closed.
+also catch and handle exceptions generated by queues, including the
+`tf.errors.OutOfRangeError` exception, which is used to report that a queue was closed.
 
 A training program that uses a coordinator must similarly catch and report
 exceptions in its main loop.
@@ -163,10 +170,10 @@ try:
             break
         sess.run(train_op)
 except Exception, e:
-   # Report exceptions to the coordinator.
-   coord.request_stop(e)
-
-# Terminate as usual.  It is innocuous to request stop twice.
-coord.request_stop()
-coord.join(threads)
+    # Report exceptions to the coordinator.
+    coord.request_stop(e)
+finally:
+    # Terminate as usual. It is safe to call `coord.request_stop()` twice.
+    coord.request_stop()
+    coord.join(threads)
 ```
